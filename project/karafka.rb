@@ -30,6 +30,7 @@ Karafka.producer.monitor.subscribe(WaterDrop::Instrumentation::LoggerListener.ne
 Karafka.monitor.subscribe(Karafka::Instrumentation::LoggerListener.new)
 Karafka.monitor.subscribe(Karafka::Instrumentation::ProctitleListener.new)
 
+# See https://karafka.io/docs/Topics-management-and-administration/
 App.consumer_groups.draw do
   consumer_group :batched_group do
     topic :example do

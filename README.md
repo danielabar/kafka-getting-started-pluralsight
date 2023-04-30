@@ -18,6 +18,7 @@
     - [Achieving Reliability](#achieving-reliability)
     - [Demo Fault-tolerance and Resiliency](#demo-fault-tolerance-and-resiliency)
   - [Producing Messages with Producers](#producing-messages-with-producers)
+    - [Intro](#intro)
   - [Consuming Messages with Consumers](#consuming-messages-with-consumers)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
@@ -593,6 +594,9 @@ Start Karafka console to demo simple produce:
 
 ```
 bundle exec karafka console
+```
+
+```ruby
 Karafka.producer.produce_sync(topic: 'example', payload: { 'ping' => 'pong' }.to_json)
 ```
 
@@ -606,6 +610,77 @@ Send few more messages using WaterDrop:
 
 ```
 bundle exec rake waterdrop:send
+```
+
+### Intro
+
+**Producer Internals**
+
+Producer is a piece of software
+
+![producer internals](doc-images/producer-internals.png "producer internals")
+
+**Configuration**
+
+[Kafka Producer Configs Doc](https://kafka.apache.org/documentation.html#producerconfigs)
+
+[Karafka Configuration Doc](https://karafka.io/docs/Configuration/)
+
+[Karafka API Doc](https://karafka.io/docs/code/karafka)
+
+[WaterDrop API Doc](https://karafka.io/docs/code/waterdrop/)
+
+Kafka configs are specified in `karafka.rb`, eg:
+
+```ruby
+class KarafkaApp < Karafka::App
+  setup do |config|
+    config.client_id = 'my_application'
+    # librdkafka configuration options need to be set as symbol values
+    config.kafka = {
+      'bootstrap.servers': '127.0.0.1:9092'
+    }
+  end
+end
+```
+
+Producer doesn't connect to to every broker in `bootstrap.servers` config property, just the first available one. Then it uses this broker to discover the full membership of the cluster including partition leaders.
+
+Best practice is to specify multiple brokers in the `bootstrap.servers` list in case the first broker happens to be unavailable.
+
+Course mentions about setting producer level config `key.serializer` and `value.serializer` but this option doesn't seem to be available in Karafka? Karafka uses [waterdrop](https://github.com/karafka/waterdrop) to produce messages. Here's list of all [config options](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md). Found a note `serializer is no longer needed because Responders have been removed from Karafka` in [Upgrade doc](https://github.com/karafka/karafka/wiki/Upgrades-2.0).
+
+Message content is encoded in binary to optimize message size.
+
+Producer is responsible to specify how the message contents are to be encoded, so later the consumer will know how to decode them.
+
+Karafka assumes by default that messages sent/received are JSON. [Deserialization](https://github.com/karafka/karafka/wiki/Deserialization)
+
+To produce a message with Karafka (it picks up config from `karafka.app`):
+
+```ruby
+10.times do
+  message = { 'number' => rand }.to_json
+  Karafka.producer.produce_async(topic: 'counters', payload: message)
+end
+```
+
+`Karafka.producer` is `WaterDrop::Producer`
+
+The `produce_async` method only requires the `topic` and `payload`.
+
+`message` must match serializer (Kafka defaults to JSON).
+
+Optionally can specify `partition` when producing message:
+
+```ruby
+Karafka.producer.produce_sync(topic: 'example', payload: { 'ping' => 'pong' }.to_json, partition: 1)
+```
+
+Optionally can also specify `timestamp` when producing message:
+
+```ruby
+Karafka.producer.produce_sync(topic: 'example', payload: { 'ping' => 'pong' }.to_json, partition: 0, timestamp: 124535353325)
 ```
 
 ## Consuming Messages with Consumers
