@@ -1,0 +1,14 @@
+source 'https://rubygems.org'
+
+# ActiveSupport and rexml are only used for XML support
+gem 'activesupport'
+gem 'rake'
+gem 'rexml'
+
+gem "karafka", ">= 2.0.34"
+
+group :development do
+  gem "rubocop"
+  gem "solargraph"
+  gem "reek"
+end
