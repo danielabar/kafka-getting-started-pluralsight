@@ -19,6 +19,8 @@
     - [Demo Fault-tolerance and Resiliency](#demo-fault-tolerance-and-resiliency)
   - [Producing Messages with Producers](#producing-messages-with-producers)
     - [Intro](#intro)
+    - [Process of Sending Messages (Part 1)](#process-of-sending-messages-part-1)
+    - [Process of Sending Messages (Part 2)](#process-of-sending-messages-part-2)
   - [Consuming Messages with Consumers](#consuming-messages-with-consumers)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
@@ -682,6 +684,111 @@ Optionally can also specify `timestamp` when producing message:
 ```ruby
 Karafka.producer.produce_sync(topic: 'example', payload: { 'ping' => 'pong' }.to_json, partition: 0, timestamp: 124535353325)
 ```
+
+Aspects of timestamp are defined in `server.properties`:
+
+```
+log.message.timestamp.type = [CreateTime, LogAppendTime]
+```
+
+CreateTime: Default, timestamp applied to message is set by producer, this is what gets committed to log.
+
+LogAppendTime: Will use time at which broker appended message to commit log.
+
+Optionally can specify `key` when producing message:
+
+```ruby
+Karafka.producer.produce_sync(topic: "example", payload: { 'greeting' => 'hello' }.to_json, key: "foo")
+```
+
+key: Determines how and to which partition within a topic, the producer sends a message to. Recall a producer writes to multiple partitions within a topic.
+
+**Best Practice: Define a Key**
+
+It's optional, but you should use it. Purpose of key:
+
+1. Provides additional information in the message.
+2. Can determine what partitions messages are routed to.
+
+Drawback: Additional overhead of increased payload size.
+
+### Process of Sending Messages (Part 1)
+
+Modify `ExampleConsumer` to output the message key:
+
+```ruby
+class ExampleConsumer < ApplicationConsumer
+  def consume
+    messages.each do |message|
+      key = message.key
+      payload = message.payload
+      timestamp = message.timestamp
+      partition = message.partition
+      puts "Key: #{key}, Payload: #{payload}, Timestamp: #{timestamp}, Partition: #{partition}"
+    end
+  end
+end
+```
+
+Launch `bundle exec karafka console` and produce a message with a key:
+
+```ruby
+Karafka.producer.produce_sync(topic: "example", payload: { 'greeting' => 'hello' }.to_json, key: "foo")
+```
+
+Launch `bundle exec karafka server` to have consumer poll for messages, output will be:
+
+```
+I, [2023-05-13T07:36:38.466743 #11763]  INFO -- : [c7ba6b9351e0] Consume job for ExampleConsumer on example/0 started
+Key: foo, Payload: {"greeting"=>"hello"}, Timestamp: 2023-05-13 07:36:37 -0400, Partition: 0
+```
+
+**What's Going On Under the Hood When Producer Sends**
+
+* Producer queries cluster (using bootstrap servers list) to discover cluster membership
+* Response comes in the form of metadata containing info about topics, partitions, managing brokers
+* Producer uses response to instantiate a Metadata object.
+* Producer keeps the Metadata object up-to-date with latest info about cluster.
+
+Producer runs a "pipeline":
+* Producer passes message through Serializer
+* Then message goes to Partitioner which is responsible for determining which partition to send the record to
+* Partitioner can use different partitioning strategies based on info in message
+
+**Producer Partitioning (aka Routing) Strategy**
+
+![partitioning strategy](doc-images/paritioning-strategy.png "partitioning strategy")
+
+* First the producer looks at the message it has to send and checks if the `partition` field has been specified?
+* If partition is specified, then producer needs to make sure its valid, i.e. for the requested topic, does this partition exist?
+* To answer if specified partition is valid, producer looks at its Metadata object.
+* If Metadata says that partition doesn't exist or is unavailable for the topic, raises "Unknown partition" error.
+* If partition is valid, producer will add the record to the specified partition buffer on the topic - this is the `direct` strategy, then on a separate thread, it awaits the result of the `send` operation to broker leader of that partition.
+* If partition was not specified, then producer checks if message has a key?
+* If no key is specified, then producer uses `round-robin` strategy - evenly distribute messages across all partitions in topic.
+* If key is specified, then producer checks whether a custom/non-default partitioning class was configured as part of the producer instantiation.
+* If no custom partitioning class is specified but key is specified, producer will use `key mod-hash` strategy. This is default provided by Kafka - it takes a `murmur` of the key, then runs `mod` using num partitions for topic, then routes message to that partition.
+* Finally if a custom partitioning class is specified, this means developer is providing their own partitioner implementation, this is the `custom` strategy.
+
+Strategies are:
+1. direct
+2. round-robin (default partitioner)
+3. key mod-hash
+4. custom
+
+**Related Concepts in Karafka**
+
+* [partition_key vs key in Waterdrop](https://karafka.io/docs/FAQ/#what-is-the-difference-between-partition_key-and-key-in-the-waterdrop-gem)
+* [partition_class setting in Karafka](https://github.com/karafka/karafka/blob/master/lib/karafka/setup/config.rb#L137) - note this is in internal->processing, should not be modified directly.
+* [rdkafka-ruby PR to use specified partitioner for partition key](https://github.com/appsignal/rdkafka-ruby/pull/173/files)
+* [rdkafka-ruby PR to allow string partitioner config](https://github.com/appsignal/rdkafka-ruby/pull/213/files)
+* [karafka pro virtual partitions](https://karafka.io/docs/Pro-Virtual-Partitions/)
+
+### Process of Sending Messages (Part 2)
+
+
+
+
 
 ## Consuming Messages with Consumers
 

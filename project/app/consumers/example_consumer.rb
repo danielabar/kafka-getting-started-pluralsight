@@ -4,10 +4,11 @@
 class ExampleConsumer < ApplicationConsumer
   def consume
     messages.each do |message|
+      key = message.key
       payload = message.payload
       timestamp = message.timestamp
       partition = message.partition
-      puts "Payload: #{payload}, Timestamp: #{timestamp}, Partition: #{partition}"
+      puts "Key: #{key}, Payload: #{payload}, Timestamp: #{timestamp}, Partition: #{partition}"
     end
   end
 
