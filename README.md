@@ -962,6 +962,23 @@ Key: 3393e58b, Payload: {"number"=>7}, Timestamp: 2023-05-14 08:53:12 -0400, Par
 ...
 ```
 
+Note: If stop containers, then try to re-up them, may get errors like:
+
+```
+ERROR Error while creating ephemeral at /brokers/ids/1, node already exists
+and owner '72075955082625025' does not match current session '72075962265632769'
+```
+
+Workaround:
+
+```
+docker-compose -f docker-compose-multiple.yml stop
+docker-compose -f docker-compose-multiple.yml rm -f
+docker-compose -f docker-compose-multiple.yml up
+```
+
+Data directories are mapped to named volumes in `docker-compose-multiple.yml` so previously created topics, partitions, messages, etc. should be preserved even after containers are removed.
+
 ### Advanced Topics
 
 Not in scope of course:
