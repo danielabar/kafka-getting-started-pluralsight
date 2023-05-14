@@ -21,7 +21,12 @@
     - [Intro](#intro)
     - [Process of Sending Messages (Part 1)](#process-of-sending-messages-part-1)
     - [Process of Sending Messages (Part 2)](#process-of-sending-messages-part-2)
+    - [Message Buffering and Micro-batching](#message-buffering-and-micro-batching)
+    - [Message Delivery and Ordering Guarantee](#message-delivery-and-ordering-guarantee)
+    - [Demo](#demo-1)
+    - [Advanced Topics](#advanced-topics)
   - [Consuming Messages with Consumers](#consuming-messages-with-consumers)
+    - [Subscribing and Unsubscribing to Topics](#subscribing-and-unsubscribing-to-topics)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -786,10 +791,194 @@ Strategies are:
 
 ### Process of Sending Messages (Part 2)
 
+After partitioning scheme is established, producer dispatches record into an in-memory queue known as `RecordAccumulator`
 
+**Micro-batching in Apache Kafka**
 
+At scale, efficiency is everything.
 
+Each time message is sent, persisted, read - incurs overhead. Can affect performance in high throughput systems.
+
+Analogy: If have a large number of boxes in a garage that need to be moved, its more efficient to use a moving truck rather than a small passenger car. Because with the truck, can transport more boxes at once. Assuming you have the same number of loaders and unloaders, it would take more trips with the smaller vehicle.
+
+Micro-batching refers to small, fast batches of messages, used by: Producer to send, Broker to write, and Consumer to read.
+
+`RecordAccumulator` gives producer ability to micro-batch records intended to be sent at high volumes and high frequency.
+
+Given a record that's been assigned to a partition by the Partitioner, it gets passed to RecordAccumulator. This record gets added to a collection of `RecordBatch` objects, for each TopicPartition.
+
+Each RecordBatch object is a small batch of records, that will be sent to broker that owns the assigned partition.
+
+How many records go in a RecordBatch? Answer comes from advanced config settings, defined at producer level.
+
+### Message Buffering and Micro-batching
+
+Each `RecordBatch` object has a max size as to how many producer records can be buffered. Controlled by `batch.size` setting.
+
+There's also `buffer.memory` setting to set max memory (in bytes) that can be used to buffer all records waiting to be sent.
+
+If number of records waiting to be sent reaches `buffer.memory`, then `max.block.ms` setting is used. Determines how many milliseconds the `send` method is blocked for. During `max.block.ms`, records get sent, freeing up buffer memory for more records to get queued.
+
+When records get sent to a RecordBatch, will wait there until:
+1. `batch.size` of that RecordBatch is reached, then sent immediately.
+2. `linger.ms` is reached - number of milliseconds a non-full buffer should wait before transmitting the records.
+
+After messages are sent, broker responds with `RecordMetadata` which indicates whether send was successful or not.
+
+### Message Delivery and Ordering Guarantee
+
+**Delivery Guarantees**
+
+When sending messages, producer can specify the level of acknowledgement `acks` it wants from broker. Options for `acks` setting are:
+* 0: fire and forget - risky, no ack will be sent by broker, fast, but not reliable. Eg: broker could be having issue that prevents it from persisting message in commit log, but producer app will never get to know about this and will keep sending messages that get lost. Could be fine for applications in which some data can be "lossy", such as clickstream data.
+* 1: leader acknowledged - producer only asking for leader broker to confirm receipt, but does not wait for all replica members to also confirm receipt. Good balance between performance and reliability.
+* 2: replication quorum acknowledged - producer requesting that all in-sync replicas confirm receipt, before broker will consider that message has been sent successfully. Highest reliability, but worst performance.
+
+If broker responds with error, producer needs to decide how to handle it:
+* `retries` config setting controls how many times producer will retry to send message before aborting.
+* `retry.backoff.ms` config setting specifies wait period in milliseconds between retries
+
+**Ordering Guarantees**
+
+Message order is only preserved within a given partition. If producer sends messages to a partition in a particular order, that will be the order in which the broker appends those messages to the log. And consumers will read these messages from the log in the same order.
+
+There is no global order across partitions. If this is required, have to handle at consumer.
+
+Error handling can complicate ordering, recall settings `retries` and `retry.backoff.ms`. Eg: If `retries` is enabled and `retry.backoff.ms` value is set too low: 1st message sent, but producer doesn't receive ack within `retry.backoff.ms` milliseconds, so producer will retry. But before the retry can be sent, 2nd message is sent and receives ack in time. And then the first message retry works. Results in reverse order, even within the same partition, where second message will be written first in partition, followed by first message.
+
+To avoid above situation, can set `max.in.flight.request.per.connection` setting to 1. This tells producer only 1 request can be made at any given time. But this would drastically lower throughput.
+
+**Delivery semantics**
+
+Options are:
+
+* At-most-once
+* At-least-once
+* Only-once
+
+### Demo
+
+Run with 3 brokers, create a topic with 3 partitions and replication factor of 3. Run a producer sending multiple messages each with a key, payload is an increasing sequence of integers. Log payload from consumer, observe that messages do not arrive in order.
+
+```
+docker-compose -f docker-compose-multiple.yml up
+```
+
+Shell into one of the brokers to create a topic with 3 partitions:
+
+```bash
+docker exec -it kafka1 /bin/bash
+
+# create topic
+kafka-topics --bootstrap-server localhost:9092 --create --topic ordering_demo --partitions 3 --replication-factor 3
+
+# confirm topic config
+kafka-topics --bootstrap-server localhost:9092 --describe --topic ordering_demo
+# Topic: ordering_demo	Partition: 0	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
+# Topic: ordering_demo	Partition: 1	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2
+# Topic: ordering_demo	Partition: 2	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3
+```
+
+Register a consumer in `karafka.rb`:
+
+```ruby
+class App < Karafka::App
+  setup do |config|
+    config.concurrency = 5
+    config.max_wait_time = 1_000
+    config.kafka = { 'bootstrap.servers': ENV['KAFKA_HOST'] || '127.0.0.1:8097' }
+  end
+end
+
+App.consumer_groups.draw do
+  topic :ordering_demo do
+    consumer OrderingDemoConsumer
+  end
+end
+```
+
+Add the consumer class:
+
+```ruby
+class OrderingDemoConsumer < ApplicationConsumer
+  def consume
+    messages.each do |message|
+      key = message.key
+      payload = message.payload
+      timestamp = message.timestamp
+      partition = message.partition
+      offset = message.offset
+      puts "Key: #{key}, Payload: #{payload}, Timestamp: #{timestamp}, Partition: #{partition}, Offset: #{offset}"
+    end
+  end
+end
+```
+
+Launch Karafka console:
+
+```
+bundle exec karafka console
+```
+
+Generate 100 messages in sequence (aka producer) with randomly generated hex key:
+
+```ruby
+100.times do |i|
+  message = { 'number' => i }.to_json
+  key = SecureRandom.hex(4)
+  puts "Sending message #{i}, key #{key}"
+  Karafka.producer.produce_async(topic: 'ordering_demo', key: key, payload: message)
+end
+```
+
+Launch Karafka server to get the consumer to start polling:
+
+```
+bundle exec karafka server
+```
+
+Observe the output from consumer, messages are read from various partitions, not in global sequence 0->99. First few lines shown here:
+
+```
+Key: 3c096b7a, Payload: {"number"=>0}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 0
+Key: 6857951e, Payload: {"number"=>14}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 1
+Key: e0dd1e50, Payload: {"number"=>1}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 0
+Key: 6c3b9615, Payload: {"number"=>5}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 1
+Key: ccd171ec, Payload: {"number"=>19}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 2
+Key: 573160dc, Payload: {"number"=>20}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 3
+Key: 2ef69d3a, Payload: {"number"=>27}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 4
+Key: bb054389, Payload: {"number"=>28}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 5
+Key: 57885415, Payload: {"number"=>29}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 1, Offset: 6
+Key: fcd22d6a, Payload: {"number"=>6}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 2
+Key: 583fa48f, Payload: {"number"=>8}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 3
+Key: 2694794b, Payload: {"number"=>9}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 4
+Key: 2c6f99ec, Payload: {"number"=>10}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 5
+Key: 52f9467e, Payload: {"number"=>12}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 6
+Key: 82ccd3e8, Payload: {"number"=>18}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 2, Offset: 7
+Key: abd2cb66, Payload: {"number"=>2}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 0, Offset: 0
+Key: 9ee9a673, Payload: {"number"=>3}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 0, Offset: 1
+Key: 57d49c6f, Payload: {"number"=>4}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 0, Offset: 2
+Key: 3393e58b, Payload: {"number"=>7}, Timestamp: 2023-05-14 08:53:12 -0400, Partition: 0, Offset: 3
+...
+```
+
+### Advanced Topics
+
+Not in scope of course:
+
+* Custom serializers, see this [demo project](https://github.com/danielabar/karafka_avro_demo/blob/main/karafka.rb#L33-L56) for example of using Avro deserializer.
+* Custom Partitioners
+* Asynchronous Send, in Karafka, this is `Karafka.producer.produce_async(topic: 'person', payload: message)`
+* Compression
+* Advanced Settings
 
 ## Consuming Messages with Consumers
 
+Some overlapping config with producers:
+
+* `bootstrap.servers`: Cluster membership - partition leaders, etc.
+* `key.deserializer`, `value.deserializer`: Classes used for message deserialization. These must match how the producer serialized the messages.
+
 [Consumer Config Docs](https://kafka.apache.org/documentation.html#consumerconfigs)
+
+### Subscribing and Unsubscribing to Topics

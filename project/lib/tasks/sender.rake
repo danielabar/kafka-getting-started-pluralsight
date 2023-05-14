@@ -20,4 +20,15 @@ namespace :waterdrop do
 
     Karafka.producer.close
   end
+
+  desc 'Generate many messages for ordering demo'
+  task :send_order do
+    100.times do |i|
+      message = { 'number' => i }.to_json
+      key = SecureRandom.hex(4)
+      puts "Sending message #{i}, key #{key}"
+      Karafka.producer.produce_async(topic: 'ordering_demo', key: key, payload: message)
+    end
+    # Karafka.producer.close
+  end
 end
