@@ -27,6 +27,10 @@
     - [Advanced Topics](#advanced-topics)
   - [Consuming Messages with Consumers](#consuming-messages-with-consumers)
     - [Subscribing and Unsubscribing to Topics](#subscribing-and-unsubscribing-to-topics)
+    - [Subscribe vs Assign](#subscribe-vs-assign)
+    - [Single Consumer Topic Subscriptions](#single-consumer-topic-subscriptions)
+    - [The Poll Loop](#the-poll-loop)
+    - [Consumer Polling](#consumer-polling)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -999,3 +1003,99 @@ Some overlapping config with producers:
 [Consumer Config Docs](https://kafka.apache.org/documentation.html#consumerconfigs)
 
 ### Subscribing and Unsubscribing to Topics
+
+In Karafka, use the [routing DSL](https://karafka.io/docs/Routing/):
+
+```ruby
+# karafka.rb
+App.consumer_groups.draw do
+  topic :example do
+    consumer ExampleConsumer
+  end
+end
+```
+
+With Kafka, a consumer can subscribe to any number of topics.
+
+### Subscribe vs Assign
+
+When consumer *subscribes* to topic, this leads to automatic (or dynamic) partition assignment. i.e. the single consumer instance will poll from every partition within that topic.
+
+When consumer subscribes to multiple topics, it will poll from every partition within every topic.
+
+A consumer could instead use the `assign` method, which will subscribe it to a particular partition. Consumer will poll one or more partitions, regardless of the topic they're a part of. This is an advanced use case.
+
+### Single Consumer Topic Subscriptions
+
+Consumer that is subscribed to a topic constantly polls all partitions of the topic, looking for new messages to consume. If it's subscribed to multiple topics, will poll all partitions of all topics, which can be a lot of work for a single consumer instance to be doing.
+
+Benefit of `subscribe` method is that partition management is handled automatically, don't need additional custom logic in consumer to do this.
+
+Eg: Suppose new partition is added to topic (cluster administrator could be trying to improve scalability). This changes cluster metadata, which gets sent to consumer. Consumer will automatically use the updated metadata to add new partition to its topic list and start polling for messages.
+
+**assign**
+
+In this case, consumer assigns itself a list of specific partitions (these could belong to different topics, but consumer isn't really operating at the topic level here, although it is aware of what partition belongs to what topic). If a new partition is added, consumer will be notified, but won't change its behaviour.
+
+### The Poll Loop
+
+* Primary function of consumer is to execute the `poll()` loop
+* Continuously polls brokers for data
+* Single API for handling all consumer/broker interactions (more interactions beyond message retrieval, will cover later)
+
+When using Karafka, it manages the poll loop for you, no need to write this loop in consumers.
+
+Useful tool provided by Kafka for perf testing:
+```
+docker exec -it kafka1 /bin/bash
+
+kafka-producer-perf-test --topic ordering_demo --num-records 50 --record-size 40 --throughput 10 --print-metrics --producer-props bootstrap.servers=localhost:9092 key.serializer=org.apache.kafka.common.serialization.StringSerializer value.serializer=org.apache.kafka.common.serialization.StringSerializer
+```
+
+`record-size` is in bytes.
+
+`throughput` is number of messages per second, or -1 for now throttling.
+
+Note that by default, Karafka uses [JSON::Deserializer](https://github.com/karafka/karafka/blob/master/lib/karafka/serialization/json/deserializer.rb). But the Kafka perf test produces string messages using built-in Kafka string serializer. To be able to consume these, change consumer to use a String deserializer as follows:
+
+```ruby
+# karafka.rb
+App.consumer_groups.draw do
+  topic :ordering_demo do
+    consumer OrderingDemoConsumer
+    deserializer StringDeserializer.new
+  end
+end
+```
+
+```ruby
+# lib/string_deserializer.rb
+class StringDeserializer
+  def call(params)
+    params.raw_payload.to_s
+  end
+end
+```
+
+Leave consumer running via `bundle exec karafka server`. Then
+
+Use `kafka-topics` shell program to `alter` existing topic to increase partitions from 3 to 4:
+
+```bash
+docker exec -it kafka1 /bin/bash
+
+# alter topic
+kafka-topics --bootstrap-server localhost:9092 --alter --topic ordering_demo --partitions 4
+
+# confirm updated topic config
+kafka-topics --bootstrap-server localhost:9092 --describe --topic ordering_demo
+Topic: ordering_demo	TopicId: 1U2pjiRYTMC5NYm8cWVgeQ	PartitionCount: 4	ReplicationFactor: 3	Configs:
+# Topic: ordering_demo	Partition: 0	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
+# Topic: ordering_demo	Partition: 1	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2
+# Topic: ordering_demo	Partition: 2	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3
+# Topic: ordering_demo	Partition: 3	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
+```
+
+Run the perf test again, should see consumer automatically detecting new partition and consuming from it.
+
+### Consumer Polling

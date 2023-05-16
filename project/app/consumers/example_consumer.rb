@@ -6,6 +6,7 @@ class ExampleConsumer < ApplicationConsumer
     messages.each do |message|
       key = message.key
       payload = message.payload
+      # payload = message.raw_payload
       timestamp = message.timestamp
       partition = message.partition
       puts "Key: #{key}, Payload: #{payload}, Timestamp: #{timestamp}, Partition: #{partition}"

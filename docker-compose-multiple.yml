@@ -5,16 +5,16 @@ services:
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-    volumes:
-      - zoo_data:/var/lib/zookeeper/data
+    # volumes:
+    #   - zoo_data:/var/lib/zookeeper/data
 
   kafka1:
     image: confluentinc/cp-kafka:7.2.1
     container_name: kafka1
     ports:
       - "8097:8097"
-    volumes:
-      - kafka_data_1:/var/lib/kafka/data
+    # volumes:
+    #   - kafka_data_1:/var/lib/kafka/data
     depends_on:
       - zookeeper
     environment:
@@ -29,8 +29,8 @@ services:
     container_name: kafka2
     ports:
       - "8098:8098"
-    volumes:
-      - kafka_data_2:/var/lib/kafka/data
+    # volumes:
+    #   - kafka_data_2:/var/lib/kafka/data
     depends_on:
       - zookeeper
     environment:
@@ -45,8 +45,8 @@ services:
     container_name: kafka3
     ports:
       - "8099:8099"
-    volumes:
-      - kafka_data_3:/var/lib/kafka/data
+    # volumes:
+    #   - kafka_data_3:/var/lib/kafka/data
     depends_on:
       - zookeeper
     environment:
@@ -56,8 +56,8 @@ services:
       KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:8099,INTERNAL://kafka3:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
 
-volumes:
-  zoo_data:
-  kafka_data_1:
-  kafka_data_2:
-  kafka_data_3:
+# volumes:
+#   zoo_data:
+#   kafka_data_1:
+#   kafka_data_2:
+#   kafka_data_3:

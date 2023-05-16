@@ -36,6 +36,7 @@ Karafka.monitor.subscribe(Karafka::Instrumentation::ProctitleListener.new)
 App.consumer_groups.draw do
   topic :ordering_demo do
     consumer OrderingDemoConsumer
+    deserializer StringDeserializer.new
   end
   # consumer_group :batched_group do
   #   topic :example do
