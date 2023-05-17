@@ -31,6 +31,9 @@
     - [Single Consumer Topic Subscriptions](#single-consumer-topic-subscriptions)
     - [The Poll Loop](#the-poll-loop)
     - [Consumer Polling](#consumer-polling)
+    - [Message Processing](#message-processing)
+    - [Consumer Offset in Detail](#consumer-offset-in-detail)
+    - [Offset Behaviour and Management](#offset-behaviour-and-management)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1099,3 +1102,71 @@ Topic: ordering_demo	TopicId: 1U2pjiRYTMC5NYm8cWVgeQ	PartitionCount: 4	Replicati
 Run the perf test again, should see consumer automatically detecting new partition and consuming from it.
 
 ### Consumer Polling
+
+When either `subscribe` or `assign` method invoked on consumer, content of collections (topics, partitions) are used to populate `SubscriptionState` object. This object interacts with `ConsumerCoordinator`, which manages partition offsets.
+
+When `poll` is invoked, consumer settings (such as bootstrap server) used to request metadata about the cluster. This is stored in internal `Metadata` object in consumer, which is periodically updated as `poll` method runs.
+
+`Fetcher` object handles communication between consumer and cluster. `fetch` operations will do this.
+
+`ConsumerNetworkClient` performs actual communication between consumer and cluster. This sends TCP packets. It sends heartbeats to let the cluster know which consumers are still connected.
+
+Once `Metadata` is available, the `ConsumerCoordinator` can do its work. It maintains awareness of automatic/dynamic partition re-assignment. It also commits offsets to the cluster.
+
+The `Fetcher` gets info from `SubscriptionState` about what topic/partitions it should be requesting messages for.
+
+When poll is invoked, it gets passed a timeout in ms, eg: `poll(100)`. This is number of ms consumer network client should spend polling cluster for messages before returning. This is min amt of time each message retrieval cycle takes.
+
+When timeout expires, a batch of records is returned and added to in-memory buffer. They get parsed, deserialized, and grouped into `ConsumerRecords` by topic and partition.
+
+### Message Processing
+
+* `poll()` process is a single-threaded operation.
+* There is one `poll` loop per consumer.
+* Can only have a single thread per consumer (but Karafka is multi-threaded!)
+* This design is to keep the consumer simple
+* Parallelism of message consumption happens in a different way (covered later)
+
+After `poll` method has returned messages (aka consumer records) for processing:
+
+* Consumer must iterate over the returned messages to process them one at a time
+* `main()` -> `for()` -> `process()`
+* What happens in `process` is business logic determined by consumer application developer
+* But careful with too heavy processing because that will block the single thread
+* However, due to Kafka architecture, one slow consumer will not impact overall cluster performance
+
+### Consumer Offset in Detail
+
+![offset detail](doc-images/offset-detail.png "offset detail")
+
+* Offset enables consumers to operate independently.
+* Offset is last message position in a topic partition that the consumer has read.
+* There are different categories of offsets
+* When consumer starts reading from partition, first it needs to determine what it has already read, and what it hasn't yet read. The answer to this is `last committed offset`.
+* `last committed offset` is the last record that consumer has *confirmed* to have processed.
+* Offsets apply to each partition, i.e. for a given topic, consumer may have multiple different offsets its keeping track of, one for each partition in topic.
+* As consumer reads records from `last committed offset`, it keeps track of its `current position`.
+* `current position` advances as consumer advances towards end of commit log.
+* Last record in partition is `log-end offset`
+* `current position` can be ahead of `last committed offset`, this difference is: `un-committed offsets`. A robust system design will keep this gap as narrow as possible.
+
+Optional consumer properties that affect its behaviour wrt offset management:
+
+1. `enable.auto.commit`: Defaults to `true`. This gives Kafka responsibility to manage when `current` offset is upgraded to `committed`. Kafka implements this by using an interval of time (see next property), and runs a commit action each unit of time.
+2. `auto.commit.interval`: Defaults to `5000` ms. i.e. Kafka will commit the current offset every 5 seconds.
+
+Need to be careful about how Kafka's auto-commit behaviour (if enabled by above settings) will interact with custom business processing logic.
+
+Eg: `last committed = 3` and `current position = 4`. Suppose the current record being processed (at offset 4) takes longer than 5000 ms to be processed. Kafka will autocommit and update `last committed = 4`, even if consumer is still in the middle of processing the current position of 4. This is not consistent. Could be ok with an "eventually consistent" system. Leads to *reliability* topic.
+
+**Reliability**
+
+> The extent in which your system can be tolerant of eventually consistency is determined by its reliability.
+
+i.e. if system cannot ensure robustness and reliability, then "eventual consistency" can lead to "never consistent".
+
+Suppose in the middle of processing current position 4 which is taking longer than 5000 ms (recall Kafka has auto committed it), some error occurs and processing fails. Now its hard for consumer to know how far back to go and start processing again. Because Kafka has already autocommitted position 4.
+
+Impacts will vary depending on if there's a single consumer or multiple consumers operating within a consumer group (more on this later).
+
+### Offset Behaviour and Management
