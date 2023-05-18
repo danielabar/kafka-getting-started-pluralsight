@@ -34,6 +34,8 @@
     - [Message Processing](#message-processing)
     - [Consumer Offset in Detail](#consumer-offset-in-detail)
     - [Offset Behaviour and Management](#offset-behaviour-and-management)
+    - [CommitSync and CommitAsync](#commitsync-and-commitasync)
+    - [When to Manage Your Own Offsets](#when-to-manage-your-own-offsets)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1170,3 +1172,70 @@ Suppose in the middle of processing current position 4 which is taking longer th
 Impacts will vary depending on if there's a single consumer or multiple consumers operating within a consumer group (more on this later).
 
 ### Offset Behaviour and Management
+
+* It's possible for a message to be read, but not committed,depends on offset management mode.
+* Offset commit behaviour is configurable:
+  * `enable.auto.commit = true` (default): When true, Kafka manages commits. This is generally convenient, but can cause issues if some records take longer than the `auto.commit.interval` to be processed and an error occurs during processing.
+  * `auto.commit.interval.ms = 5000` (default): This is the commit frequency, which can be adjusted to fit consumer application. You can increase this value if you know that some record processing may take longer than this. However, having this larger also creates an offset gap, where commits lag behind processing position. Having a gap means potential inconsistencies, could lead to duplication of record processing on restart.
+  * `auto.offset.reset = latest` (default): Strategy to use when consumer starts reading from a new partition. Default is to start reading from the latest known committed offset. Could be set to `earliest`. There's also a `none` setting where Kafka will throw exception to consumer, which must then decide what to do.
+
+Offset behaviour and related issues vary depending on: Single Consumer vs. Consumer Group
+
+**Storing the Offsets**
+
+Kafka stores offsets in a dedicated topic named `__consumer_offsets`. It has 50 partitions, can see this in a broker shell:
+
+```bash
+kafka-topics --bootstrap-server localhost:9092 --describe __consumer_offsets
+# Topic: __consumer_offsets	TopicId: 2rTbvkVmQz-ArNPd00ZLzQ	PartitionCount: 50	ReplicationFactor: 3	Configs: compression.type=producer,cleanup.policy=compact,segment.bytes=104857600
+# Topic: __consumer_offsets	Partition: 0	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2
+# Topic: __consumer_offsets	Partition: 1	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3
+# Topic: __consumer_offsets	Partition: 2	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
+# Topic: __consumer_offsets	Partition: 3	Leader: 3	Replicas: 3,2,1	Isr: 3,2,1
+# ...
+```
+
+ In a broker shell, use `kafka-get-offsets` to determine what offsets are persisted for a given topic:
+
+```bash
+kafka-get-offsets --bootstrap-server localhost:9092 --topic ordering_demo
+# ordering_demo:0:15
+# ordering_demo:1:16
+# ordering_demo:2:19
+```
+
+The `ConsumerCoordinator` component of the consumer is responsible for producing messages with the offset values to the `__consumer_offsets` topic. i.e. a consumer also functions as a producer.
+
+**Offset Management**
+
+There are two modes: Automatic (default) and Manual.
+
+Manual mode is an advanced usage.
+
+To use manual mode: `enable.auto.commit = false`. In this case, the `auto.commit.interval.ms` property is ignored.
+
+In manual mode, consumer takes full responsibility for committing offset after record is considered fully processed. It needs to use the commit api which is either:
+* `commitSync()`
+* `commitAsync()`
+
+For Karafka, see [Offset management(checkpointing)](https://karafka.io/docs/Offset-management/)
+
+### CommitSync and CommitAsync
+
+Use `commitSync()` when need precise control over when a record is considered completely processed. Good for environments that need high levels of consistency, and don't ever want to retrieve new records for processing, until absolutely sure that the current record(s) have been committed.
+
+Recommendation is to invoke `commitSync()` *after* consumer has completed iterating/processing a batch of records. i.e. don't call it in the middle of the for loop that's processing records but after.
+
+Note that this method will introduce latency because its synchronous, i.e. blocks until receives response from cluster.
+
+`commitSync()` will automatically retry until it succeeds or receives unrecoverable error from cluster. The retry interval is controlled with setting `retry.backoff.ms`, which defaults to `100` ms.
+
+In a Karafka consumer, use `mark_as_consumed!` for a blocking offset commitment, and `mark_as_consumed` for nob-blocking.
+
+`commitAsync()` can also be used to control when messages are considered fully processed. This version of the method is non-blocking, however, its also non-deterministic. i.e. you won't know exactly when commit succeeded or failed. This version does not auto retry, because retrying without knowing whether previous call succeeded/failed can lead to ordering issues or record duplication.
+
+With async version, can use a callback to be notified of response from cluster whether commit succeeded/failed (don't see this as an option in Karafka?).
+
+Async method is non blocking -> better throughput and performance because consumer is not waiting for a response before it continues processing. However, recommend always using it with a callback to handle response from cluster.
+
+### When to Manage Your Own Offsets
