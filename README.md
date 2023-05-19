@@ -36,6 +36,7 @@
     - [Offset Behaviour and Management](#offset-behaviour-and-management)
     - [CommitSync and CommitAsync](#commitsync-and-commitasync)
     - [When to Manage Your Own Offsets](#when-to-manage-your-own-offsets)
+    - [Scaling-out Consumers](#scaling-out-consumers)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1000,6 +1001,10 @@ Not in scope of course:
 
 ## Consuming Messages with Consumers
 
+Diagram below, details will be explained going through this section:
+
+![consumer diagram](doc-images/consumer-diagram.png "consumer diagram")
+
 Some overlapping config with producers:
 
 * `bootstrap.servers`: Cluster membership - partition leaders, etc.
@@ -1239,3 +1244,74 @@ With async version, can use a callback to be notified of response from cluster w
 Async method is non blocking -> better throughput and performance because consumer is not waiting for a response before it continues processing. However, recommend always using it with a callback to handle response from cluster.
 
 ### When to Manage Your Own Offsets
+
+**Committing Offsets**
+
+Offset management happens after `poll()` method has timed out and returned records for processing.
+
+Could be either auto commit or consumer explicitly calling one of the commit APIs (commitSync or commitAsync).
+
+`commit()` process takes a batch of records, determine their offsets, and ask ConsumerCoordinator to commit these to the cluster.
+
+ConsumerCoordinator commits the offsets via ConsumerNetworkClient.
+
+After offsets have been confirmed to have been committed by the cluster, ConsumerCoordinator updates the `SubscriptionState` object.
+
+Given that the `SubscriptionState` object is up to date, the fetcher then knows what offsets have been committed and what should be the next records it needs to be retrieved.
+
+**Going It Alone**
+
+Reasons why you might want to take control of offset management yourself rather than letting Kafka handle it via auto.commit:
+
+* Consistency control: May need finer grained control over when a message is considered processed and ready to commit. i.e. you have your own definition of "done", whereas the Kafka auto.commit thinks done is when the `auto.commit.interval` ms has expired.
+* Atomicity: Being able to treat steps of message consumption and processing as single atomic operation (analogy to relational database transaction). Needed by systems that need to be highly consistent.
+* Exactly once vs At-least-once: If your system must have "Exactly once" message processing, need to manage your own offsets. With a distributed system, it's possible that messages will arrive out-of-order or have duplicate messages.
+
+### Scaling-out Consumers
+
+If stick with only a single consumer, it may become responsible for reading dozens or more topics, each with multiple partitions, which could lead a consumer consuming from hundreds of partitions. Will be too much work for a single process, especially a single-threaded process (recall `poll()` process is a single-threaded application).
+
+Solution is to scale out the number of consumers consuming messages. But they can't be completely independent, they need to work together as a group.
+
+**Consumer Groups**
+
+Recall previous discussions about scaling out various parts of Kafka:
+
+* Need more production capacity? Add more producers.
+* Need more message retention and redundancy? Add more brokers.
+* Need more metadata management facilities? Add more Zookeeper members.
+* Need greater ability to consumer and process messages? Use Consumer Groups.
+
+Consumer Groups: Independent consumers processes working as a team.
+
+A consumer joins a group by specifying the `group.id` setting as config property before it starts.
+
+When consumers are in a group, message processing for a given topic is distributed evenly across number of consumers in the group.
+
+Using consumer groups:
+* Increases parallelism and throughput.
+* Improves redundancy - if one consumer fails, the work will be automatically re-balanced across the remaining consumers.
+* Improves performance - a group of consumers can get through a large backlog of messages faster than a single consumer.
+
+**Example**
+
+![consumer group](doc-images/consumer-group.png "consumer group")
+
+* Three consumers specify `group.id = "orders"` to join the `orders` consumer group.
+* Each consumer invokes the `subscribe(...)` method, passing in `orders` topic name.
+* Kafka designates/elects one broker from the cluster to serve as the `GroupCoordinator` for the `orders` group.
+* The `GroupCoordinator` broker is responsible to monitor/maintain groups' membership.
+* `GroupCoordinator` works with cluster coordinator and Zookeeper to assign/monitor partitions within a topic to individual consumers within the group.
+* When consumer group is formed, each consumer sends heartbeats (controlled via `heartbeat.interval.ms` default 3000, and `session.timeout.ms` properties, default 30000).
+* `GroupCoordinator` uses the consumer heartbeats to determine whether that consumer is still alive and able to participate in the group.
+* `session.timeout.ms` is max amount of time `GroupCoordinator` will wait before not receiving any heartbeats from a consumer. If this occurs, group coordinator will consider this consumer to have failed and take corrective action.
+
+**Consumer Rebalance**
+
+![consumer group rebalance](doc-images/consumer-group-rebalance.png "consumer group rebalance")
+
+* If a consumer fails, the load will be rebalanced - group coordinator will re-assign the failing consumers' partition to another consumer.
+* So now another consumer is taking on twice the load.
+* The consumer that got re-assigned the failed consumers partition needs to figure out where the failed consumer left off and catch up, ideally, without re-processing records that were previously processed by the failed consumer.
+
+Left at 4:40
