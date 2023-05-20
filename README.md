@@ -37,6 +37,8 @@
     - [CommitSync and CommitAsync](#commitsync-and-commitasync)
     - [When to Manage Your Own Offsets](#when-to-manage-your-own-offsets)
     - [Scaling-out Consumers](#scaling-out-consumers)
+    - [Consumer Group Coordinator](#consumer-group-coordinator)
+    - [Demo](#demo-2)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1209,6 +1211,50 @@ kafka-get-offsets --bootstrap-server localhost:9092 --topic ordering_demo
 # ordering_demo:2:19
 ```
 
+Can we also see the consumers? https://stackoverflow.com/questions/31061781/what-command-shows-all-of-the-topics-and-offsets-of-partitions-in-kafka
+
+```bash
+kafka-consumer-groups --bootstrap-server localhost:9092 --all-groups --all-topics --describe
+# GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID                                  HOST            CLIENT-ID
+# karafka_app     ordering_demo   0          27              27              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+# karafka_app     ordering_demo   1          27              27              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+# karafka_app     ordering_demo   2          37              37              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+# karafka_app     ordering_demo   3          9               9               0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+```
+
+Note: Configure unique `client_id` per Karafka app, otherwise, starting a second app with same client_id will start consuming from last committed offset of other app because they all "look the same to Kafka".
+
+For example, start another Karafka app to consume the same topic, but give it a different client_id:
+
+```ruby
+class App < Karafka::App
+  setup do |config|
+    config.concurrency = 5
+    config.max_wait_time = 1_000
+    config.kafka = { 'bootstrap.servers': ENV['KAFKA_HOST'] || '127.0.0.1:8097' }
+    config.client_id = 'my_unique_app'
+  end
+end
+```
+
+When this second app starts, will consume from the beginning of `ordering_demo` topic:
+
+```bash
+kafka-consumer-groups --bootstrap-server localhost:9092 --all-groups --all-topics --describe
+
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID                                  HOST            CLIENT-ID
+karafka_app     ordering_demo   0          37              37              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+karafka_app     ordering_demo   1          36              36              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+karafka_app     ordering_demo   2          56              56              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+karafka_app     ordering_demo   3          21              21              0               karafka-a356bb27-02ba-4444-b6ee-98da4365531c /172.24.0.1     karafka
+
+GROUP             TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID                                        HOST            CLIENT-ID
+my_unique_app_app ordering_demo   0          37              37              0               my_unique_app-6c9fe8fc-9cf4-4226-9dc1-7dc30ec272af /172.24.0.1     my_unique_app
+my_unique_app_app ordering_demo   1          36              36              0               my_unique_app-6c9fe8fc-9cf4-4226-9dc1-7dc30ec272af /172.24.0.1     my_unique_app
+my_unique_app_app ordering_demo   2          56              56              0               my_unique_app-6c9fe8fc-9cf4-4226-9dc1-7dc30ec272af /172.24.0.1     my_unique_app
+my_unique_app_app ordering_demo   3          21              21              0               my_unique_app-6c9fe8fc-9cf4-4226-9dc1-7dc30ec272af /172.24.0.1     my_unique_app
+```
+
 The `ConsumerCoordinator` component of the consumer is responsible for producing messages with the offset values to the `__consumer_offsets` topic. i.e. a consumer also functions as a producer.
 
 **Offset Management**
@@ -1314,4 +1360,56 @@ Using consumer groups:
 * So now another consumer is taking on twice the load.
 * The consumer that got re-assigned the failed consumers partition needs to figure out where the failed consumer left off and catch up, ideally, without re-processing records that were previously processed by the failed consumer.
 
-Left at 4:40
+Eg: What if failed consumer had just finished processing a batch of messages, but didn't yet commit them when it failed. In this case, the alternate consumer that gets assigned to replace the workload of the failed consumer will end up re-processing those uncommitted messages because it can't know that they were already processed. All it has is the last committed offset from the partition.
+
+If a new consumer joins the group -> another rebalance occurs.
+
+If a new partition is added, this also causes a rebalance among consumer group.
+
+A consumer group is planned for each application that will process messages from one or more topics. Eg: `group.id = "orders"` for a group of consumers that are serving an order management system.
+
+### Consumer Group Coordinator
+
+**Consumer Group Rebalancing**
+
+Situation: A new consumer gets assigned a partition that was previously being handled by a previous consumer.
+
+Example: New consumer is being assigned Partition 0. It needs to know what offset to start from because it doesn't have a `current position` for Partition 0.
+
+The new consumer's `SubscriptionState` object has cached the value of `last committed offset` from previous consumer. For example, if this is `4`, then when the new consumer runs its first `poll()`, will use that value from SubscriptionState and know it needs to start at offset `5`.
+
+`auto.offset.reset` setting controls behaviour of new consumers that join the group wrt where they start reading from. Default value is `latest` - new consumer starts reading from latest known position. This is a good option if you can assume that the previous consumer that was reading from this partition completely/accurately committed its last processed offset. If this is not the case, then when new consumer picks up, it may process messages that were already processed by previous consumer -> dupes.
+
+**Group Coordinator**
+
+* Evenly balances available consumers to partitions
+* Attempts to have 1:1 ratio of consumers-to-partitions when there are equal number of consumers as partitions.
+* But if there are more consumers in the group than partitions, the excess consumers will be idle. i.e. GroupCoordinator will not over-provision
+* When a new partition becomes available, coordinator initiates rebalancing protocol: Engage each ConsumerCoordinator to start rebalancing process
+* Rebalancing occurs when:
+  * New partition(s) added to topic
+  * Consumer failure
+
+### Demo
+
+Alter number of partitions in existing topic to see effect on consumers:
+
+```bash
+# Update number of partitions from 3 to 4 on existing topic
+kafka-topics --bootstrap-server localhost:9092 --alter --topic ordering_demo --partitions 4
+
+# Verify
+kafka-topics --bootstrap-server localhost:9092 --describe --topic ordering_demo
+```
+
+Monitor `bundle exec karafka server` output:
+
+```
+I, INFO -- : rdkafka: [thrd:main]: Topic ordering_demo partition count changed from 3 to 4
+I, INFO -- : [a30561c0d88b] Revoked job for OrderingDemoConsumer on ordering_demo/0 started
+I, INFO -- : [a30561c0d88b] Revoked job for OrderingDemoConsumer on ordering_demo/0 finished in 0.7500000004656613ms
+I, INFO -- : [99dda4eab58f] Revoked job for OrderingDemoConsumer on ordering_demo/2 started
+I, INFO -- : [99dda4eab58f] Revoked job for OrderingDemoConsumer on ordering_demo/2 finished in 0.07099999999627471ms
+I, INFO -- : [8d37973adbb6] Revoked job for OrderingDemoConsumer on ordering_demo/1 started
+I, INFO -- : [8d37973adbb6] Revoked job for OrderingDemoConsumer on ordering_demo/1 finished in 0.1520000002346933ms
+```
