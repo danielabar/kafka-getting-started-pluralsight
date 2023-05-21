@@ -20,6 +20,7 @@ APP_LOADER.eager_load
 # App class
 class App < Karafka::App
   setup do |config|
+    config.client_id = 'learning_kafka'
     config.concurrency = 5
     config.max_wait_time = 1_000
     # config.kafka = { 'bootstrap.servers': ENV['KAFKA_HOST'] || '127.0.0.1:9092' }
@@ -34,28 +35,16 @@ Karafka.monitor.subscribe(Karafka::Instrumentation::ProctitleListener.new)
 
 # See https://karafka.io/docs/Topics-management-and-administration/
 App.consumer_groups.draw do
-  topic :ordering_demo do
-    consumer OrderingDemoConsumer
-    deserializer StringDeserializer.new
+  consumer_group :group_example do
+    topic :example do
+      consumer ExampleConsumer
+    end
   end
-  # consumer_group :batched_group do
-  #   topic :example do
-  #     consumer ExampleConsumer
-  #   end
 
-  #   topic :xml_data do
-  #     config(partitions: 2)
-  #     consumer XmlMessagesConsumer
-  #     deserializer XmlDeserializer.new
-  #   end
-
-  #   topic :counters do
-  #     config(partitions: 1)
-  #     consumer CountersConsumer
-  #   end
-
-  #   topic :ordering_demo do
-  #     consumer OrderingDemoConsumer
-  #   end
-  # end
+  consumer_group :group_ordering do
+    topic :ordering_demo do
+      consumer OrderingDemoConsumer
+      deserializer StringDeserializer.new
+    end
+  end
 end
