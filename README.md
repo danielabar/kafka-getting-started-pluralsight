@@ -42,6 +42,8 @@
       - [Example 1 Single Consumer Group](#example-1-single-consumer-group)
       - [Example 2 Multiple Consumer Group](#example-2-multiple-consumer-group)
     - [Demo](#demo-2)
+  - [Config and Advanced Topics](#config-and-advanced-topics)
+  - [Ecosystem](#ecosystem)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -74,6 +76,8 @@ In the shell, you can run any Kafka commands, eg:
 May need to `docker rm -f zookeeper_learning` and `docker rm -f kafka_learning` or figure out how to clean `/tmp` dirs between start/stop.
 
 ## Architecture
+
+Apache Kafka was created by LinkedIn.
 
 ### Messaging System
 
@@ -1548,3 +1552,47 @@ I, INFO -- : [99dda4eab58f] Revoked job for OrderingDemoConsumer on ordering_dem
 I, INFO -- : [8d37973adbb6] Revoked job for OrderingDemoConsumer on ordering_demo/1 started
 I, INFO -- : [8d37973adbb6] Revoked job for OrderingDemoConsumer on ordering_demo/1 finished in 0.1520000002346933ms
 ```
+
+## Config and Advanced Topics
+
+Consumer performance and throughput can be affected by some settings and combinations of settings:
+
+* `fetch.min.bytes` Specifies minimum number of bytes that must be returned from `poll()`. Prevents wasted processing cycles when there aren't enough messages to process. Similar to `batch.size` setting on producer.
+* `max.fetch.wait.ms` Number of ms to wait if there isn't enough data to meet threshold set by `fetch.min.bytes`. Similar to `linger.ms` on producer side.
+* `max.partition.fetch.bytes` Used to ensure that each `poll()` doesn't retrieve more data than processing loop can handle. This sets max number of bytes per partition that `poll()` is allowed to retrieve per cycle.
+* `max.poll.records` Related to previous setting. Max number of records allowed per `poll()` cycle. T
+
+Last two settings useful for throttling size and number of incoming batches of records. Use when processing loop takes a long time and don't want to risk a session timeout.
+
+**Advanced Topics Not Covered**
+
+Further ways in which you can take control of consumers behaviour:
+
+Consumer position control API: Specify how consumer should read the messages. Methods available are:
+* `seek()` Specify exactly which offset you want to read for a given topic/partition
+* `seekToBeginning()` Indicate you want to start from the beginning of a specific topic/partition
+* `seekToEnd()` Opposite of beginning.
+
+Flow control API: Can also control flow of messages:
+* `pause()` May want to pause a consumer processing a particular topic to go focus on a different topic that is higher priority. Useful when a single consumer is responsible for processing multiple topics/partitions.
+* `resume()`
+
+Rebalance Listeners: Can use this when subscribing to topics as part of a consumer group. Listeners can notify consumer when a rebalance has occurred, then consumer can optionally do some manual offset management at this time.
+
+## Ecosystem
+
+Note course is from 2016, probably before Schema Registry.
+
+**Primary Use Cases**
+
+* Connecting disparate sources of data
+* Large-scale data movement pipelines (can replace expensive/fragile ETLs)
+* "Big Data" integration
+
+**Challenges**
+
+* Governance and data evolution (see Schema Registry and evolution strategies)
+* Consistency and productivity
+* Bit and fast data
+
+Recall producer is using "contract" of key.serializer and value.serializer. Given variety of data, will end up using a variety of custom serializers. Need to version these. Consumers need to be able to parse this with corresponding key/value deserializers, that are also version aware.
